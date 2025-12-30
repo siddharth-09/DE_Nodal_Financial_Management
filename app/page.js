@@ -2,12 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import cytoscape from 'cytoscape';
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
 
 export default function Home() {
   const [showWelcome, setShowWelcome] = useState(true);
@@ -23,6 +17,27 @@ export default function Home() {
   const cyRef = useRef(null);
   const cyContainerRef = useRef(null);
 
+  // Load data from localStorage on mount
+  useEffect(() => {
+    const savedBudgetId = localStorage.getItem('budgetId');
+    const savedTotalAmount = localStorage.getItem('totalAmount');
+    const savedNodes = localStorage.getItem('nodes');
+    const savedExpenses = localStorage.getItem('expenses');
+
+    if (savedBudgetId && savedTotalAmount && savedNodes) {
+      setBudgetId(savedBudgetId);
+      setTotalAmount(savedTotalAmount);
+      const parsedNodes = JSON.parse(savedNodes);
+      setNodes(parsedNodes);
+      setShowWelcome(false);
+      setTimeout(() => initCytoscape(parsedNodes), 100);
+    }
+
+    if (savedExpenses) {
+      setAllExpenses(JSON.parse(savedExpenses));
+    }
+  }, []);
+
   const getNodeSpent = (nodeId) => {
     return allExpenses
       .filter(e => e.node_id === nodeId)
@@ -33,17 +48,12 @@ export default function Home() {
     return allExpenses.reduce((sum, e) => sum + parseFloat(e.amount), 0);
   };
 
-  const initializeBudget = async (amount) => {
+  const initializeBudget = (amount) => {
     try {
-      const { data: budget, error: budgetError } = await supabase
-        .from('budgets')
-        .insert({ total_amount: amount })
-        .select()
-        .single();
-
-      if (budgetError) throw budgetError;
-
-      setBudgetId(budget.id);
+      const budgetId = Date.now().toString();
+      setBudgetId(budgetId);
+      localStorage.setItem('budgetId', budgetId);
+      localStorage.setItem('totalAmount', amount.toString());
 
       const defaultNodes = [
         { name: 'Investment', percentage: 20 },
@@ -51,21 +61,16 @@ export default function Home() {
         { name: 'Needs', percentage: 50 }
       ];
 
-      const nodesToInsert = defaultNodes.map(node => ({
-        budget_id: budget.id,
+      const createdNodes = defaultNodes.map((node, index) => ({
+        id: `node_${budgetId}_${index}`,
+        budget_id: budgetId,
         name: node.name,
         percentage: node.percentage,
         allocated_amount: (amount * node.percentage) / 100
       }));
 
-      const { data: createdNodes, error: nodesError } = await supabase
-        .from('budget_nodes')
-        .insert(nodesToInsert)
-        .select();
-
-      if (nodesError) throw nodesError;
-
       setNodes(createdNodes);
+      localStorage.setItem('nodes', JSON.stringify(createdNodes));
       setShowWelcome(false);
       
       setTimeout(() => initCytoscape(createdNodes), 100);
@@ -176,24 +181,7 @@ export default function Home() {
     });
   };
 
-  const loadAllExpenses = async () => {
-    if (!budgetId || nodes.length === 0) return;
-    
-    try {
-      const { data, error } = await supabase
-        .from('expenses')
-        .select('*')
-        .in('node_id', nodes.map(n => n.id))
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setAllExpenses(data || []);
-    } catch (error) {
-      console.error('Error loading expenses:', error);
-    }
-  };
-
-  const addExpense = async (e) => {
+  const addExpense = (e) => {
     e.preventDefault();
     if (!selectedNode || !newExpense.itemName || !newExpense.amount) {
       alert('Please fill in item name and amount');
@@ -211,20 +199,18 @@ export default function Home() {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('expenses')
-        .insert({
-          node_id: selectedNode.id,
-          item_name: newExpense.itemName,
-          amount: amount,
-          note: newExpense.note || null
-        })
-        .select()
-        .single();
+      const newExpenseData = {
+        id: `expense_${Date.now()}`,
+        node_id: selectedNode.id,
+        item_name: newExpense.itemName,
+        amount: amount,
+        note: newExpense.note || null,
+        created_at: new Date().toISOString()
+      };
 
-      if (error) throw error;
-
-      setAllExpenses([data, ...allExpenses]);
+      const updatedExpenses = [newExpenseData, ...allExpenses];
+      setAllExpenses(updatedExpenses);
+      localStorage.setItem('expenses', JSON.stringify(updatedExpenses));
       setNewExpense({ itemName: '', amount: '', note: '' });
     } catch (error) {
       console.error('Error adding expense:', error);
@@ -232,18 +218,13 @@ export default function Home() {
     }
   };
 
-  const deleteExpense = async (expenseId) => {
+  const deleteExpense = (expenseId) => {
     if (!confirm('Are you sure you want to delete this expense?')) return;
 
     try {
-      const { error } = await supabase
-        .from('expenses')
-        .delete()
-        .eq('id', expenseId);
-
-      if (error) throw error;
-
-      setAllExpenses(allExpenses.filter(e => e.id !== expenseId));
+      const updatedExpenses = allExpenses.filter(e => e.id !== expenseId);
+      setAllExpenses(updatedExpenses);
+      localStorage.setItem('expenses', JSON.stringify(updatedExpenses));
     } catch (error) {
       console.error('Error deleting expense:', error);
       alert('Failed to delete expense. Please try again.');
@@ -280,7 +261,7 @@ export default function Home() {
     setEditingNodes(updated);
   };
 
-  const saveEditedNodes = async () => {
+  const saveEditedNodes = () => {
     const totalPercentage = editingNodes.reduce((sum, n) => sum + parseFloat(n.percentage || 0), 0);
     if (Math.abs(totalPercentage - 100) > 0.01) {
       alert('Total percentage must equal 100%');
@@ -293,28 +274,16 @@ export default function Home() {
     }
 
     try {
-      const { error: deleteError } = await supabase
-        .from('budget_nodes')
-        .delete()
-        .eq('budget_id', budgetId);
-
-      if (deleteError) throw deleteError;
-
-      const nodesToInsert = editingNodes.map(node => ({
+      const newNodes = editingNodes.map((node, index) => ({
+        id: node.id || `node_${budgetId}_${Date.now()}_${index}`,
         budget_id: budgetId,
         name: node.name,
         percentage: parseFloat(node.percentage),
         allocated_amount: (parseFloat(totalAmount) * parseFloat(node.percentage)) / 100
       }));
 
-      const { data: newNodes, error: insertError } = await supabase
-        .from('budget_nodes')
-        .insert(nodesToInsert)
-        .select();
-
-      if (insertError) throw insertError;
-
       setNodes(newNodes);
+      localStorage.setItem('nodes', JSON.stringify(newNodes));
       setEditMode(false);
       setSelectedNode(null);
       
@@ -328,10 +297,6 @@ export default function Home() {
       alert('Failed to save changes. Please try again.');
     }
   };
-
-  useEffect(() => {
-    loadAllExpenses();
-  }, [budgetId, nodes]);
 
   if (showWelcome) {
     return (
